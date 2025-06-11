@@ -35,6 +35,33 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
 
+# Local Database (SQLite)
+  sqflite: ^2.3.3+1             # SQLite plugin for Flutter
+  path_provider: ^2.1.3       # For accessing file system paths (to store database file)
+  path: ^1.9.0                # For path manipulation (often used with sqflite)
+
+  # File Handling & Permissions
+  file_picker: ^10.1.9         # For user to pick files (import/export)
+  permission_handler: ^11.3.1  # For requesting permissions (e.g., storage access)
+
+  # Data Encryption & Hashing
+  encrypt: ^5.0.3             # For encrypting/decrypting data files
+  bcrypt: ^1.1.3              # For securely hashing PINs
+
+  # Sharing
+  share_plus: ^11.0.0         # For sharing files via OS share sheet
+  shared_preferences: ^2.2.2
+
+  # State Management
+  # provider: ^6.1.2 # Alternative state management
+  flutter_riverpod: ^2.5.1    # Recommended for versatile state management
+
+  # Utility
+  uuid: ^4.4.0                # For generating Unique IDs
+  intl: ^0.20.0               # For date and number formatting
+  package_info_plus: ^8.3.0   # For retrieving app version information
+
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
