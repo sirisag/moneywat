@@ -109,6 +109,47 @@ class _RecordMonkFundAtTreasurerTransactionScreenState
       return; // User cancelled
     }
 
+    // --- Check for insufficient funds before proceeding with transaction ---
+    if (!widget.isDeposit) {
+      // Only check for withdrawals
+      MonkFundAtTreasurer? monkFund = await _dbHelper.getMonkFundAtTreasurer(
+        widget.monk.primaryId,
+        _currentTreasurerId!,
+      );
+      final currentBalance = monkFund?.balance ?? 0;
+      if (currentBalance < amount) {
+        if (!mounted) return;
+        bool? confirmProceed = await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext dialogContext) {
+            return AlertDialog(
+              title: const Text('ยอดเงินไม่เพียงพอ'),
+              content: Text(
+                'ยอดเงินปัจจัยของพระ ${widget.monk.displayName} ที่ฝากกับคุณมี ${_currencyFormat.format(currentBalance)} บาท\n'
+                'หากดำเนินการต่อ ยอดเงินจะติดลบ ${_currencyFormat.format(amount - currentBalance)} บาท\n'
+                'คุณต้องการดำเนินการต่อหรือไม่?',
+              ),
+              actions: <Widget>[
+                TextButton(
+                  child: const Text('ยกเลิก'),
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                ),
+                TextButton(
+                  child: const Text('ยืนยันดำเนินการต่อ'),
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                ),
+              ],
+            );
+          },
+        );
+        if (confirmProceed == null || !confirmProceed) {
+          setState(() => _isLoading = false);
+          return; // User cancelled after insufficient funds warning
+        }
+      }
+    }
+
     final transaction = Transaction(
       uuid: _uuid.v4(),
       type: widget.isDeposit
@@ -128,25 +169,39 @@ class _RecordMonkFundAtTreasurerTransactionScreenState
     );
 
     try {
-      await _dbHelper.insertTransaction(transaction);
+      final db = await _dbHelper.database;
+      await db.transaction((txn) async {
+        // 1. Insert the transaction
+        await _dbHelper.insertTransaction(transaction, txn: txn);
 
-      // Update MonkFundAtTreasurer
-      MonkFundAtTreasurer? monkFund = await _dbHelper.getMonkFundAtTreasurer(
-        widget.monk.primaryId,
-        _currentTreasurerId!,
-      );
+        // 2. Update MonkFundAtTreasurer
+        MonkFundAtTreasurer? monkFund = await _dbHelper.getMonkFundAtTreasurer(
+          widget.monk.primaryId,
+          _currentTreasurerId!,
+          txn: txn,
+        );
+        monkFund ??= MonkFundAtTreasurer(
+          monkPrimaryId: widget.monk.primaryId,
+          treasurerPrimaryId: _currentTreasurerId!,
+          balance: 0,
+          lastUpdated: timestamp,
+        );
 
-      monkFund ??= MonkFundAtTreasurer(
-        monkPrimaryId: widget.monk.primaryId,
-        treasurerPrimaryId: _currentTreasurerId!,
-        balance: 0,
-        lastUpdated: timestamp,
-      );
+        monkFund.balance += (widget.isDeposit ? amount : -amount);
+        monkFund.lastUpdated = timestamp;
+        await _dbHelper.insertOrUpdateMonkFundAtTreasurer(monkFund);
+        // Pass txn to the update method
+        await _dbHelper.insertOrUpdateMonkFundAtTreasurer(monkFund, txn: txn);
 
-      monkFund.balance += (widget.isDeposit ? amount : -amount);
-      monkFund.lastUpdated = timestamp;
-      await _dbHelper.insertOrUpdateMonkFundAtTreasurer(monkFund);
-
+        // 3. Update TempleFundAccount (only for withdrawals from treasurer)
+        if (!widget.isDeposit) {
+          await _dbHelper.updateTempleFundBalance(
+            _currentTreasurerId!,
+            -amount,
+            txn: txn,
+          );
+        }
+      }); // End transaction
       if (mounted) {
         ScaffoldMessenger.of(
           context,

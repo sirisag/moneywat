@@ -695,7 +695,7 @@ class DatabaseHelper {
   Future<void> updateTempleFundBalance(
     String treasurerPrimaryId,
     int amountChange, {
-    sqflite.Transaction? txn,
+    sqflite.Transaction? txn, // Added txn parameter
   }) async {
     // final sqflite.DatabaseExecutor dbClient = txn ?? await database; // Not needed here as getTempleFund and insertOrUpdateTempleFund handle txn
     TempleFundAccount? fund = await getTempleFund(treasurerPrimaryId, txn: txn);

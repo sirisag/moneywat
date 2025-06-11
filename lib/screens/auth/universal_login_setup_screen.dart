@@ -15,6 +15,8 @@ import 'package:moneywat/screens/auth/monk_config_screen.dart';
 import 'package:moneywat/screens/dashboard/treasurer_dashboard_screen.dart';
 import 'package:moneywat/screens/dashboard/driver_dashboard_screen.dart';
 import 'package:moneywat/screens/dashboard/monk_dashboard_screen.dart';
+import 'package:moneywat/utils/constants.dart'; // Import AppConstants
+import 'package:moneywat/screens/auth/recover_account_screen.dart'; // Import recover account screen
 
 class UniversalLoginSetupScreen extends StatefulWidget {
   const UniversalLoginSetupScreen({super.key});
@@ -50,14 +52,16 @@ class _UniversalLoginSetupScreenState extends State<UniversalLoginSetupScreen> {
     _prefs = await SharedPreferences.getInstance();
     if (!mounted) return; // Check if the widget is still in the tree
     setState(() {
-      _isSetupComplete = _prefs.getBool('is_setup_complete') ?? false;
+      _isSetupComplete = _prefs.getBool(AppConstants.isSetupComplete) ?? false;
       if (_isSetupComplete) {
-        _loggedInUserDisplayName = _prefs.getString('user_display_name');
-        _loggedInUserPrimaryId = _prefs.getString('user_primary_id');
+        _loggedInUserDisplayName = _prefs.getString(
+          AppConstants.userDisplayName,
+        );
+        _loggedInUserPrimaryId = _prefs.getString(AppConstants.userPrimaryId);
         _loggedInUserSecondaryId = _prefs.getString(
-          'user_secondary_id',
+          AppConstants.userSecondaryId,
         ); // Load secondary ID
-        String? roleString = _prefs.getString('user_role');
+        String? roleString = _prefs.getString(AppConstants.userRole);
 
         if (roleString != null && roleString.isNotEmpty) {
           try {
@@ -70,7 +74,7 @@ class _UniversalLoginSetupScreenState extends State<UniversalLoginSetupScreen> {
             _loggedInUserRole = null;
             _isSetupComplete = false;
             _loggedInUserSecondaryId = null;
-            _prefs.setBool('is_setup_complete', false);
+            _prefs.setBool(AppConstants.isSetupComplete, false);
           }
         } else {
           // Handle error if roleString is null or empty
@@ -80,7 +84,7 @@ class _UniversalLoginSetupScreenState extends State<UniversalLoginSetupScreen> {
           _loggedInUserRole = null; // Or a default/unknown role
           _isSetupComplete = false;
           _loggedInUserSecondaryId = null;
-          _prefs.setBool('is_setup_complete', false);
+          _prefs.setBool(AppConstants.isSetupComplete, false);
         }
       }
       _isLoading = false;
@@ -118,7 +122,7 @@ class _UniversalLoginSetupScreenState extends State<UniversalLoginSetupScreen> {
             content: Text('ข้อมูลผู้ใช้ไม่สมบูรณ์, กรุณาตั้งค่าใหม่'),
           ),
         );
-        await _prefs.setBool('is_setup_complete', false);
+        await _prefs.setBool(AppConstants.isSetupComplete, false);
         if (!mounted) return; // Added mounted check
         setState(() {
           _isSetupComplete = false;
@@ -157,7 +161,7 @@ class _UniversalLoginSetupScreenState extends State<UniversalLoginSetupScreen> {
           content: Text('ไม่พบข้อมูลผู้ใช้หรือ PIN, กรุณาตั้งค่าใหม่'),
         ),
       );
-      await _prefs.setBool('is_setup_complete', false);
+      await _prefs.setBool(AppConstants.isSetupComplete, false);
       setState(() {
         _isSetupComplete = false;
         _loggedInUserSecondaryId = null;
@@ -290,8 +294,8 @@ class _UniversalLoginSetupScreenState extends State<UniversalLoginSetupScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading && !_isSetupComplete) {
-      // Show loading only on initial load or during processing
+    if (_isLoading) {
+      // Show loading indicator as long as preferences are being loaded
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
@@ -428,6 +432,22 @@ class _UniversalLoginSetupScreenState extends State<UniversalLoginSetupScreen> {
                         )
                       : Text(_isSetupComplete ? 'เข้าสู่ระบบ' : 'ดำเนินการต่อ'),
                 ),
+                if (!_isSetupComplete) ...[
+                  const SizedBox(height: 20),
+                  TextButton(
+                    onPressed: _isLoading
+                        ? null
+                        : () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (context) =>
+                                    const RecoverAccountScreen(),
+                              ),
+                            );
+                          },
+                    child: const Text('เข้าสู่ระบบบัญชีเดิม (กู้คืน)'),
+                  ),
+                ],
               ],
             ),
           ),

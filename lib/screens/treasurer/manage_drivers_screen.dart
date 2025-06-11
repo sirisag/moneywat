@@ -731,10 +731,12 @@ class _ManageDriversScreenState extends State<ManageDriversScreen> {
       }
 
       // --- BEGIN PRE-VALIDATION ---
-      List<String> insufficientFundMonks = [];
+      List<String> insufficientMonkFundNames = [];
+      bool isTempleFundInsufficient = false;
+
       for (var entry in monkTransfers.entries) {
         if (entry.value > 0) {
-          final monkId = entry.key;
+          final monkId = entry.key; // This is monkPrimaryId
           final amountToTransfer = entry.value;
           MonkFundAtTreasurer? mFund = await _dbHelper.getMonkFundAtTreasurer(
             monkId,
@@ -742,37 +744,74 @@ class _ManageDriversScreenState extends State<ManageDriversScreen> {
           ); // No txn here
           if (mFund == null || mFund.balance < amountToTransfer) {
             User? monkUser = await _dbHelper.getUser(monkId);
-            insufficientFundMonks.add(monkUser?.displayName ?? monkId);
+            insufficientMonkFundNames.add(monkUser?.displayName ?? monkId);
           }
         }
       }
 
-      if (insufficientFundMonks.isNotEmpty) {
+      if (newAdvanceAmount > 0) {
+        final TempleFundAccount? templeFund = await _dbHelper.getTempleFund(
+          treasurerPrimaryId,
+        ); // No txn here
+        final currentTempleBalance = templeFund?.balance ?? 0;
+        if (currentTempleBalance < newAdvanceAmount) {
+          isTempleFundInsufficient = true;
+        }
+      }
+
+      // If any fund is insufficient, show confirmation dialog
+      if (insufficientMonkFundNames.isNotEmpty || isTempleFundInsufficient) {
+        String templeShortfallMessage = "";
+        if (isTempleFundInsufficient) {
+          // Fetch the current temple balance again to construct the accurate message.
+          // This implies newAdvanceAmount > 0 and currentTempleBalance < newAdvanceAmount.
+          final TempleFundAccount? tempTempleFund = await _dbHelper
+              .getTempleFund(treasurerPrimaryId);
+          final int tempCurrentBalance = tempTempleFund?.balance ?? 0;
+          final int shortfall = newAdvanceAmount - tempCurrentBalance;
+          templeShortfallMessage =
+              '- ยอดเงินกองกลางวัดจะติดลบ ${_currencyFormat.format(shortfall)} บาท\n';
+        }
+
+        String monkWarningMessage = "";
+        if (insufficientMonkFundNames.isNotEmpty) {
+          monkWarningMessage =
+              'ยอดเงินปัจจัยของพระต่อไปนี้ที่ฝากกับคุณไม่เพียงพอ:\n- ${insufficientMonkFundNames.join("\n- ")}\n';
+        }
+
+        final String dialogMessage =
+            "$templeShortfallMessage$monkWarningMessage\nคุณต้องการดำเนินการต่อหรือไม่? (ยอดเงินจะติดลบ)";
+
         // ignore: use_build_context_synchronously
         if (!mounted) return;
-        await showDialog(
+        final bool? confirmOverride = await showDialog<bool>(
           context: context,
           builder: (dialogCtx) => AlertDialog(
             title: const Text('ยอดเงินไม่เพียงพอ'),
-            content: Text(
-              'ไม่สามารถโอนเงินให้พระต่อไปนี้ได้เนื่องจากยอดเงินในบัญชี (กับไวยาวัจกรณ์) ไม่เพียงพอ:\n- ${insufficientFundMonks.join("\n- ")}\n\nกรุณาตรวจสอบยอดเงินของพระ หรือปรับปรุงจำนวนเงินที่จะโอน',
-            ),
+            content: Text(dialogMessage),
             actions: [
               TextButton(
-                onPressed: () => Navigator.of(dialogCtx).pop(),
-                child: const Text('ตกลง'),
+                onPressed: () => Navigator.of(dialogCtx).pop(false),
+                child: const Text('ยกเลิก'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(dialogCtx).pop(true),
+                child: const Text('ยืนยันดำเนินการต่อ'),
               ),
             ],
           ),
         );
-        setState(() => _isLoading = false);
-        return; // Abort operation
+        if (confirmOverride == null || !confirmOverride) {
+          setState(() => _isLoading = false);
+          return; // Abort operation if user cancels
+        }
       }
       // --- END PRE-VALIDATION ---
 
       final db = await _dbHelper.database;
       await db.transaction((txn) async {
         if (newAdvanceAmount > 0) {
+          // This check is a safeguard, primary validation is outside.
           final giveAdvanceTx = Transaction.create(
             type: TransactionType.GIVE_DRIVER_ADVANCE,
             amount: newAdvanceAmount,
@@ -814,27 +853,31 @@ class _ManageDriversScreenState extends State<ManageDriversScreen> {
               treasurerPrimaryId,
               txn: txn,
             );
-            // This check is now a safeguard, primary validation is outside.
-            if (mFund == null || mFund.balance < amountToTransfer) {
-              throw Exception(
-                'ยอดเงินของพระ $monkId ไม่เพียงพอ (ตรวจสอบซ้ำภายใน transaction)',
+
+            if (mFund != null) {
+              // Monk has an existing fund, deduct the amount.
+              // The pre-validation dialog already confirmed if this goes negative.
+              mFund.balance -= amountToTransfer;
+              mFund.lastUpdated = DateTime.now();
+              await _dbHelper.insertOrUpdateMonkFundAtTreasurer(
+                mFund,
+                txn: txn,
+              );
+            } else {
+              // Monk has no fund record with treasurer, but user confirmed to proceed.
+              // Create a new fund record with a negative balance, representing the amount
+              // "advanced" by the treasurer on behalf of this monk to the driver.
+              final newMonkFund = MonkFundAtTreasurer(
+                monkPrimaryId: monkId,
+                treasurerPrimaryId: treasurerPrimaryId,
+                balance: -amountToTransfer, // Amount "advanced"
+                lastUpdated: DateTime.now(),
+              );
+              await _dbHelper.insertOrUpdateMonkFundAtTreasurer(
+                newMonkFund,
+                txn: txn,
               );
             }
-
-            final transferTx = Transaction.create(
-              type: TransactionType.TRANSFER_MONK_FUND_TO_DRIVER,
-              amount: amountToTransfer,
-              note: 'โอนปัจจัยของพระ $monkId ให้ ${driver.displayName} ดูแล',
-              recordedByPrimaryId: treasurerPrimaryId,
-              sourceAccountId: monkId,
-              destinationAccountId: driver.primaryId,
-              status: TransactionStatus.exportedToDriver, // Or completed
-            );
-            await _dbHelper.insertTransaction(transferTx, txn: txn);
-
-            mFund.balance -= amountToTransfer;
-            mFund.lastUpdated = DateTime.now();
-            await _dbHelper.insertOrUpdateMonkFundAtTreasurer(mFund, txn: txn);
 
             monkFundsToTransferDataForFile.add({
               'monkPrimaryId': monkId,
@@ -844,11 +887,52 @@ class _ManageDriversScreenState extends State<ManageDriversScreen> {
         }
 
         // Export file after all DB operations in transaction are successful
+        // Fetch data required for the export file INSIDE the transaction
+        List<Map<String, dynamic>> reconciledTransactionUpdatesForFile = [];
+        final List<Transaction> allReconciledTxs = await _dbHelper
+            .getTransactionsByStatusAndProcessor(
+              TransactionStatus.reconciledByTreasurer,
+              treasurerPrimaryId, // Processor is the treasurer
+              txn: txn,
+            );
+        reconciledTransactionUpdatesForFile = allReconciledTxs
+            .where((tx) => tx.recordedByPrimaryId == driver.primaryId)
+            .map((tx) => {'uuid': tx.uuid, 'status': tx.status?.name})
+            .toList();
+
+        int updatedDriverAdvanceBalanceForFile = 0;
+        final DriverAdvanceAccount? driverAdvanceAccount = await _dbHelper
+            .getDriverAdvance(driver.primaryId, txn: txn);
+        updatedDriverAdvanceBalanceForFile = driverAdvanceAccount?.balance ?? 0;
+
+        List<Map<String, dynamic>> updatedMonkListForFile = [];
+        final List<User> allMonksFromDb = await _dbHelper.getUsersByRole(
+          UserRole.monk,
+          txn: txn,
+        );
+        updatedMonkListForFile = allMonksFromDb.map((monk) {
+          try {
+            return monk.toMap(forFileExport: true);
+          } catch (e) {
+            print(
+              "[ManageDriversScreen] Error mapping monk ${monk.primaryId} for export: $e",
+            );
+            // Decide how to handle: skip monk, throw, or return partial data?
+            // For now, let's rethrow to make the problem visible.
+            throw Exception(
+              "Error in monk.toMap for ${monk.primaryId} during update export: $e",
+            );
+          }
+        }).toList();
+
         exportedFilePath = await _fileExportService
             .exportTreasurerUpdateToDriver(
               driverToUpdate: driver,
               newAdvanceGiven: newAdvanceAmount,
               monkFundsToTransfer: monkFundsToTransferDataForFile,
+              reconciledTransactionUpdates: reconciledTransactionUpdatesForFile,
+              updatedDriverAdvanceBalance: updatedDriverAdvanceBalanceForFile,
+              updatedMonkList: updatedMonkListForFile,
               treasurerPrimaryId: treasurerPrimaryId,
               treasurerSecondaryId: treasurerSecondaryId,
             );

@@ -374,30 +374,32 @@ class FileExportService {
     required int newAdvanceGiven, // New advance amount treasurer is giving
     required List<Map<String, dynamic>>
     monkFundsToTransfer, // List of {'monkPrimaryId': String, 'amount': int}
+    required List<Map<String, dynamic>>
+    reconciledTransactionUpdates, // Pass this data in
+    required int updatedDriverAdvanceBalance, // Pass this data in
+    required List<Map<String, dynamic>> updatedMonkList, // Pass this data in
     required String treasurerPrimaryId,
     required String treasurerSecondaryId,
   }) async {
     try {
       final timestamp = DateTime.now().toIso8601String();
+      if (kDebugMode) {
+        print(
+          "[FES] exportTreasurerUpdateToDriver: Starting for driver ${driverToUpdate.primaryId}",
+        );
+        print(
+          "[FES] Reconciled Tx Updates received: ${reconciledTransactionUpdates.length}",
+        );
+        print(
+          "[FES] Updated Driver Advance Balance received: $updatedDriverAdvanceBalance",
+        );
+        print("[FES] Updated Monk List received: ${updatedMonkList.length}");
+      }
 
-      final List<Transaction> reconciledDriverTransactions = await _dbHelper
-          .getTransactionsByStatusAndProcessor(
-            TransactionStatus.reconciledByTreasurer,
-            treasurerPrimaryId,
-          );
-
-      final List<Map<String, dynamic>> reconciledTransactionUpdates =
-          reconciledDriverTransactions
-              .where((tx) => tx.recordedByPrimaryId == driverToUpdate.primaryId)
-              .map((tx) => {'uuid': tx.uuid, 'status': tx.status?.name})
-              .toList();
-
-      final DriverAdvanceAccount? driverAdvanceAccount = await _dbHelper
-          .getDriverAdvance(driverToUpdate.primaryId);
-      final int updatedDriverAdvanceBalance =
-          driverAdvanceAccount?.balance ?? 0;
-
-      final List<User> allMonks = await _dbHelper.getAllUsers();
+      // Data is now passed in as parameters:
+      // - reconciledTransactionUpdates
+      // - updatedDriverAdvanceBalance
+      // - updatedMonkList
 
       final dataToExport = {
         'metadata': {
@@ -416,28 +418,56 @@ class FileExportService {
         },
         'monkFundsTransferredToDriver': monkFundsToTransfer,
         'updatedDriverAdvanceBalance': updatedDriverAdvanceBalance,
-        'updatedMonkList': allMonks
-            .map((monk) => monk.toMap(forFileExport: true))
-            .toList(),
+        'updatedMonkList': updatedMonkList, // Use the passed-in list
       };
 
-      final jsonDataString = jsonEncode(dataToExport);
+      String jsonDataString;
+      try {
+        jsonDataString = jsonEncode(dataToExport);
+        if (kDebugMode) {
+          print("[FES] JSON data encoded successfully.");
+        }
+      } catch (e) {
+        print("[FES] Error encoding JSON: $e");
+        throw Exception("Error encoding data to JSON: $e");
+      }
 
-      final encryptedDataString = _encryptionService.encryptData(
-        jsonDataString,
-        treasurerPrimaryId,
-        treasurerSecondaryId,
-      );
+      String encryptedDataString;
+      try {
+        encryptedDataString = _encryptionService.encryptData(
+          jsonDataString,
+          treasurerPrimaryId,
+          treasurerSecondaryId,
+        );
+        if (kDebugMode) {
+          print("[FES] Data encrypted successfully.");
+        }
+      } catch (e) {
+        print("[FES] Error encrypting data: $e");
+        throw Exception("Error encrypting data: $e");
+      }
 
-      final directory = await getApplicationDocumentsDirectory();
-      final filePath =
-          '${directory.path}/Update_for_driver_${driverToUpdate.displayName.replaceAll(' ', '_')}_${driverToUpdate.primaryId}_${DateTime.now().millisecondsSinceEpoch}.วัดencrypted';
-      final file = File(filePath);
-      await file.writeAsString(encryptedDataString);
+      String filePath;
+      try {
+        final directory = await getApplicationDocumentsDirectory();
+        filePath =
+            '${directory.path}/Update_for_driver_${driverToUpdate.displayName.replaceAll(' ', '_')}_${driverToUpdate.primaryId}_${DateTime.now().millisecondsSinceEpoch}.วัดencrypted';
+        final file = File(filePath);
+        await file.writeAsString(encryptedDataString);
+        if (kDebugMode) {
+          print('[FES] Treasurer update file created at: $filePath');
+        }
+      } catch (e) {
+        print("[FES] Error writing file: $e");
+        throw Exception("Error writing encrypted file: $e");
+      }
 
       return filePath;
     } catch (e) {
-      print('Error exporting treasurer update to driver: $e');
+      // This top-level catch will grab any rethrown exceptions or new ones.
+      print('[FES] Overall error in exportTreasurerUpdateToDriver: $e');
+      // Returning null will be caught by the calling function and should show an error.
+      // The `_isLoading` in the UI should be reset by the `finally` block in the calling function.
       return null;
     }
   }

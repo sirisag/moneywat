@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:moneywat/models/transaction_model.dart';
+import 'package:moneywat/models/account_balance_models.dart'; // Import AccountBalance models
 import 'package:moneywat/services/database_helper.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -103,6 +104,48 @@ class _RecordTempleTransactionDialogState
       return; // User cancelled
     }
 
+    // --- Check for insufficient funds before proceeding with transaction ---
+    if (!_isIncomeEntry) {
+      // Only check for expenses
+      final TempleFundAccount? templeFund = await _dbHelper.getTempleFund(
+        _currentTreasurerId!,
+      );
+      final currentBalance = templeFund?.balance ?? 0;
+
+      if (currentBalance < amount) {
+        if (!mounted) return;
+        bool? confirmProceed = await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext dialogContext) {
+            return AlertDialog(
+              title: const Text('ยอดเงินกองกลางวัดไม่เพียงพอ'),
+              content: Text(
+                'ยอดเงินกองกลางวัดมี ${_currencyFormat.format(currentBalance)} บาท\n'
+                'รายการรายจ่ายนี้จำนวน ${_currencyFormat.format(amount)} บาท\n'
+                'หากดำเนินการต่อ ยอดเงินกองกลางวัดจะติดลบ ${_currencyFormat.format(amount - currentBalance)} บาท\n'
+                'คุณต้องการดำเนินการต่อหรือไม่?',
+              ),
+              actions: <Widget>[
+                TextButton(
+                  child: const Text('ยกเลิก'),
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                ),
+                TextButton(
+                  child: const Text('ยืนยันดำเนินการต่อ'),
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                ),
+              ],
+            );
+          },
+        );
+        if (confirmProceed == null || !confirmProceed) {
+          setState(() => _isLoading = false);
+          return; // User cancelled after insufficient funds warning
+        }
+      }
+    }
+
     final transaction = Transaction(
       uuid: _uuid.v4(),
       type: _isIncomeEntry
@@ -125,14 +168,16 @@ class _RecordTempleTransactionDialogState
     try {
       final db = await _dbHelper.database;
       await db.transaction((txn) async {
+        // 1. Insert the transaction
         await _dbHelper.insertTransaction(transaction, txn: txn);
 
+        // 2. Update TempleFundAccount
         await _dbHelper.updateTempleFundBalance(
           _currentTreasurerId!,
           _isIncomeEntry ? amount : -amount,
-          txn: txn,
-        );
-      });
+          txn: txn, // Pass the transaction object
+        ); // Add the semicolon here
+      }); // End transaction
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

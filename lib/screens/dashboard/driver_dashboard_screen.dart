@@ -331,8 +331,9 @@ class _DriverDashboardScreenState extends State<DriverDashboardScreen> {
                         dialogContext,
                       ).pop(); // Close the selection dialog
 
-                      if (!mounted)
+                      if (!mounted) {
                         return; // Check before further async operations
+                      }
                       // Calculate total monk funds to be sent AFTER dialog is closed
                       final int advanceToReturn = int.parse(
                         advanceReturnController.text,
@@ -434,6 +435,7 @@ class _DriverDashboardScreenState extends State<DriverDashboardScreen> {
     String? finalFilePath; // Variable to hold the path if everything succeeds
     try {
       final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return; // Check mounted after async
 
       final driverDisplayName =
           prefs.getString(AppConstants.userDisplayName) ?? "คนขับรถ";
@@ -465,7 +467,7 @@ class _DriverDashboardScreenState extends State<DriverDashboardScreen> {
       // This list will hold the FORWARD_MONK_FUND_TO_TREASURER transactions
       // that will be created and included in the export file.
       List<Transaction> monkFundForwardTransactionsToExport = [];
-
+      // Fetch pending monk transactions *before* the transaction
       for (var monkUser in monksToExport) {
         // monksToExport is List<User> from dialog
         final transactions = await _dbHelper.getTransactionsForMonkAndDriver(
@@ -476,11 +478,12 @@ class _DriverDashboardScreenState extends State<DriverDashboardScreen> {
         pendingMonkTransactions.addAll(transactions);
       }
       // For selected monks, create FORWARD_MONK_FUND_TO_TREASURER transactions
-      // These will be added to the export file.
-      // The actual MonkFundAtDriver balance will NOT be set to 0 here yet.
-      // It will be set to 0 only after treasurer confirms reconciliation.
+      // These will be added to the export file and inserted into the driver's DB.
+      // The MonkFundAtDriver balance will be set to 0 *after* the treasurer reconciles.
+      // Fetch monk funds *before* the transaction to calculate amounts.
       for (var monkUser in monksToExport) {
         final MonkFundAtDriver? monkFund = await _dbHelper.getMonkFundAtDriver(
+          // This read is outside the transaction, which is fine for preparing data.
           monkUser.primaryId,
           _currentDriverId!,
         );
@@ -500,6 +503,7 @@ class _DriverDashboardScreenState extends State<DriverDashboardScreen> {
         }
       }
 
+      // Fetch pending trip expenses *before* the transaction
       final List<Transaction> pendingTripExpenses = await _dbHelper
           .getTransactionsByTypeAndStatus(
             _currentDriverId!,
@@ -508,20 +512,66 @@ class _DriverDashboardScreenState extends State<DriverDashboardScreen> {
           );
 
       final List<User> allMonksInDb = await _dbHelper.getUsersByRole(
+        // Fetch all monks *before* the transaction for the updatedMonkList
         UserRole.monk,
       );
       final List<User> newMonksPotentiallyCreatedByDriver = allMonksInDb.where((
         monk,
       ) {
+        // Filter for monks likely created by this driver (based on ID range)
         final monkIdNum = int.tryParse(monk.primaryId);
         return monkIdNum != null &&
             monkIdNum >= AppConstants.monkPrimaryIdDriverMin &&
             monkIdNum <= AppConstants.monkPrimaryIdDriverMax;
         // Note: Treasurer import logic handles if monk already exists.
       }).toList();
+      // Map monks to the format needed for the export file
+      final List<Map<String, dynamic>> allMonksMapped = allMonksInDb.map((
+        monk,
+      ) {
+        return monk.toMap(forFileExport: true);
+      }).toList();
+
+      // Fetch reconciled transaction updates *inside* the transaction
+      List<Map<String, dynamic>> reconciledTransactionUpdates = [];
+      // Fetch driver advance balance *inside* the transaction
+      int updatedDriverAdvanceBalance = 0;
 
       final db = await _dbHelper.database;
+      if (!mounted) return; // Check mounted after async
       await db.transaction((txn) async {
+        // --- Fetch data needed for export file *inside* the transaction ---
+        final List<Transaction> reconciledDriverTransactions = await _dbHelper
+            .getTransactionsByStatusAndProcessor(
+              TransactionStatus.reconciledByTreasurer,
+              treasurerPrimaryId, // Processor is the treasurer
+              txn: txn, // Use the transaction object
+            );
+        // Filter for transactions recorded by the specific driver being updated
+        reconciledTransactionUpdates = reconciledDriverTransactions
+            .where(
+              (tx) => tx.recordedByPrimaryId == _currentDriverId,
+            ) // Use current driver ID
+            .map((tx) => {'uuid': tx.uuid, 'status': tx.status?.name})
+            .toList();
+        if (kDebugMode) {
+          print(
+            "[FES] Fetched ${reconciledTransactionUpdates.length} reconciled transaction updates for driver.",
+          );
+        }
+
+        final DriverAdvanceAccount? driverAdvanceAccount = await _dbHelper
+            .getDriverAdvance(
+              _currentDriverId!,
+              txn: txn,
+            ); // Use the transaction object
+        updatedDriverAdvanceBalance = driverAdvanceAccount?.balance ?? 0;
+        if (kDebugMode) {
+          print(
+            "[FES] Fetched driver advance balance: $updatedDriverAdvanceBalance",
+          );
+        }
+
         // --- DB UPDATES ---
         // Update status of original monk transactions
         for (var txToUpdate in pendingMonkTransactions) {

@@ -166,45 +166,116 @@ class _BatchMonkFundTransactionScreenState
       return; // User cancelled
     }
 
-    try {
-      for (User monk in _selectedMonks) {
-        final transaction = Transaction(
-          uuid: _uuid.v4(),
-          type: _transactionType,
-          amount: amount,
-          timestamp: timestamp,
-          note: note,
-          recordedByPrimaryId: _currentTreasurerId!,
-          sourceAccountId:
-              _transactionType == TransactionType.DEPOSIT_FROM_MONK_TO_TREASURER
-              ? monk.primaryId
-              : _currentTreasurerId!,
-          destinationAccountId:
-              _transactionType == TransactionType.DEPOSIT_FROM_MONK_TO_TREASURER
-              ? _currentTreasurerId!
-              : monk.primaryId,
-          status: TransactionStatus.completed,
-        );
-        await _dbHelper.insertTransaction(transaction);
+    // --- Check for insufficient funds before proceeding with transaction ---
+    final totalAmount = amount * _selectedMonks.length;
+    if (_transactionType == TransactionType.MONK_WITHDRAWAL_FROM_TREASURER) {
+      final TempleFundAccount? templeFund = await _dbHelper.getTempleFund(
+        _currentTreasurerId!,
+      );
+      final currentTempleBalance = templeFund?.balance ?? 0;
 
-        MonkFundAtTreasurer? monkFund = await _dbHelper.getMonkFundAtTreasurer(
-          monk.primaryId,
-          _currentTreasurerId!,
+      if (currentTempleBalance < totalAmount) {
+        if (!mounted) return;
+        bool? confirmProceed = await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext dialogContext) {
+            return AlertDialog(
+              title: const Text('ยอดเงินกองกลางวัดไม่เพียงพอ'),
+              content: Text(
+                'ยอดเงินกองกลางวัดมี ${_currencyFormat.format(currentTempleBalance)} บาท\n'
+                'รายการเบิกกลุ่มนี้รวม ${_currencyFormat.format(totalAmount)} บาท\n'
+                'หากดำเนินการต่อ ยอดเงินกองกลางวัดจะติดลบ ${_currencyFormat.format(totalAmount - currentTempleBalance)} บาท\n'
+                'คุณต้องการดำเนินการต่อหรือไม่?',
+              ),
+              actions: <Widget>[
+                TextButton(
+                  child: const Text('ยกเลิก'),
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                ),
+                TextButton(
+                  child: const Text('ยืนยันดำเนินการต่อ'),
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                ),
+              ],
+            );
+          },
         );
-        monkFund ??= MonkFundAtTreasurer(
-          monkPrimaryId: monk.primaryId,
-          treasurerPrimaryId: _currentTreasurerId!,
-          balance: 0,
-          lastUpdated: timestamp,
-        );
-
-        monkFund.balance +=
-            (_transactionType == TransactionType.DEPOSIT_FROM_MONK_TO_TREASURER
-            ? amount
-            : -amount);
-        monkFund.lastUpdated = timestamp;
-        await _dbHelper.insertOrUpdateMonkFundAtTreasurer(monkFund);
+        if (confirmProceed == null || !confirmProceed) {
+          setState(() => _isLoading = false);
+          return; // User cancelled after insufficient funds warning
+        }
       }
+    }
+
+    // --- Proceed with transaction if funds are sufficient or user confirmed ---
+
+    try {
+      final db = await _dbHelper.database;
+      await db.transaction((txn) async {
+        for (User monk in _selectedMonks) {
+          // 1. Create and insert the transaction for this monk
+          final transaction = Transaction(
+            uuid: _uuid.v4(),
+            type: _transactionType,
+            amount: amount, // Amount per monk
+            timestamp: timestamp,
+            note: note,
+            recordedByPrimaryId: _currentTreasurerId!,
+            sourceAccountId:
+                _transactionType ==
+                    TransactionType.DEPOSIT_FROM_MONK_TO_TREASURER
+                ? monk.primaryId
+                : _currentTreasurerId!,
+            destinationAccountId:
+                _transactionType ==
+                    TransactionType.DEPOSIT_FROM_MONK_TO_TREASURER
+                ? _currentTreasurerId!
+                : monk.primaryId,
+            status: TransactionStatus.completed,
+          );
+          await _dbHelper.insertTransaction(transaction, txn: txn);
+
+          // 2. Update MonkFundAtTreasurer for this monk
+          MonkFundAtTreasurer? monkFund = await _dbHelper
+              .getMonkFundAtTreasurer(
+                monk.primaryId,
+                _currentTreasurerId!,
+                txn: txn, // Use the transaction object
+              );
+          monkFund ??= MonkFundAtTreasurer(
+            monkPrimaryId: monk.primaryId,
+            treasurerPrimaryId: _currentTreasurerId!,
+            balance: 0,
+            lastUpdated: timestamp,
+          );
+
+          monkFund.balance +=
+              (_transactionType ==
+                  TransactionType.DEPOSIT_FROM_MONK_TO_TREASURER
+              ? amount
+              : -amount);
+          monkFund.lastUpdated = timestamp;
+          await _dbHelper.insertOrUpdateMonkFundAtTreasurer(monkFund, txn: txn);
+        }
+
+        // 3. Update TempleFundAccount (once for the total batch amount)
+        if (_transactionType ==
+            TransactionType.MONK_WITHDRAWAL_FROM_TREASURER) {
+          await _dbHelper.updateTempleFundBalance(
+            _currentTreasurerId!,
+            -totalAmount,
+            txn: txn,
+          );
+        } else if (_transactionType ==
+            TransactionType.DEPOSIT_FROM_MONK_TO_TREASURER) {
+          await _dbHelper.updateTempleFundBalance(
+            _currentTreasurerId!,
+            totalAmount,
+            txn: txn,
+          );
+        }
+      }); // End transaction
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
